@@ -11,13 +11,13 @@ This module lists the objects and  fields being used in the Data Recipes
 """
 
 def obj_reference(objt=None,fld=None):
-    f = open(r"C:\Users\ramdk\Desktop\ObjectReference.csv",'w',newline='')
+    f = open(r"C:\Users\ram\Desktop\ObjectReference.csv",'w',newline='')
     fields = ["recipe_name","nodes_name","node_label","obj_name", "field_name"]
     writer = csv.DictWriter(f,fieldnames=fields)
     writer.writeheader()
     
     #get all the json files from the folder 
-    recipes_list = glob.glob(r"C:\Users\ramdk\Downloads\Project\Georgia Pacific\DataRecipe backup\Original Version/*.json")
+    recipes_list = glob.glob(r"C:\Users\ram\Downloads\Project\DataRecipe backup\Original Version/*.json")
     
     #open each file >> tokenize the content >> 
     for recipe in recipes_list:
@@ -45,12 +45,13 @@ def obj_reference(objt=None,fld=None):
                         content.clear()
                         
     f.close() # close the file
-    
+
+    # this block of code will execute only fld arguument is passed
     # check given field name is referenced in the given object, returning the recipe name
     if fld is not None :
-        df= pd.read_csv(r"C:\Users\ramdk\Desktop\ObjectReference.csv")
+        df= pd.read_csv(r"C:\Users\ramd\Desktop\ObjectReference.csv")
         df = df[df['field_name'] == fld]
-        df.to_csv(r"C:\Users\ramdk\Desktop\ObjectReference.csv",index = False)
+        df.to_csv(r"C:\Users\ramd\Desktop\ObjectReference.csv",index = False)
     
         
         
