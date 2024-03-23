@@ -1,0 +1,58 @@
+#importing required libraries
+import glob
+import json
+import csv
+import pandas as pd
+
+
+"""
+This module lists the objects and  fields being used in the Data Recipes
+- ``objects``: Input node in the Data Recipe 
+"""
+
+def obj_reference(objt=None,fld=None):
+    f = open(r"C:\Users\ramdk\Desktop\ObjectReference.csv",'w',newline='')
+    fields = ["recipe_name","nodes_name","node_label","obj_name", "field_name"]
+    writer = csv.DictWriter(f,fieldnames=fields)
+    writer.writeheader()
+    
+    #get all the json files from the folder 
+    recipes_list = glob.glob(r"C:\Users\ramdk\Downloads\Project\Georgia Pacific\DataRecipe backup\Original Version/*.json")
+    
+    #open each file >> tokenize the content >> 
+    for recipe in recipes_list:
+        file = open(recipe)
+        json_data = json.load(file)
+        content = {}
+        file.close()
+        #reads each nodes of the Recipe json file, returning input node
+        for node in json_data['nodes']:
+            #check, input node type,process records
+            if ((json_data['nodes'][node]['action'])=='load'and (json_data['nodes'][node]['parameters']['dataset'].get('type') == 'connectedDataset')) and (objt is None or (objt is not None and (json_data['nodes'][node]['parameters']['dataset'].get('sourceObjectName')) == objt)):
+                    fields = (json_data['nodes'][node]['parameters'].get('fields')) # get the fields name
+                    
+                    #reads each fields of the input node, returning fields
+                    for field in fields:
+                        content[('recipe_name')] = recipe.split('\\')[-1][:-5] # Removing last 5 characters from the file name to get the recipe Name 
+                        content[('nodes_name')] = node
+                        content[('node_label')] = (json_data['ui']['nodes'][node].get('label')) # get the label name of the input node
+                        content[('obj_name')] = (json_data['nodes'][node]['parameters']['dataset'].get('sourceObjectName')) # get the object name of the input node
+                        content[('field_name')] = field
+                        
+                        # writing the processed records to the file 
+                        writer.writerow(content)
+                        
+                        content.clear()
+                        
+    f.close() # close the file
+    
+    # check given field name is referenced in the given object, returning the recipe name
+    if fld is not None :
+        df= pd.read_csv(r"C:\Users\ramdk\Desktop\ObjectReference.csv")
+        df = df[df['field_name'] == fld]
+        df.to_csv(r"C:\Users\ramdk\Desktop\ObjectReference.csv",index = False)
+    
+        
+        
+        
+obj_reference('input your object name','input your field name')                        
