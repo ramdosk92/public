@@ -1,0 +1,389 @@
+import json
+import glob
+import os
+import pandas as pd
+from collections import defaultdict
+import re
+
+def field_tracking(objt, fld):
+    #get all the data recipe json files from the folder 
+    recipes_list = glob.glob(r"C:\Users\ramdk\Downloads\Project\DataRecipe backup\Newer Version/*.json")
+    
+    # Define path to Desktop and output CSV file location
+    desktop_folder = os.path.expanduser("~/Desktop")  # Works on Linux/Mac; on Windows, this resolves to the user's Desktop
+    output_file = os.path.join(desktop_folder, 'data_nodes.csv')
+    first_write = True  # Overwrite the file initially
+    
+    #process each recipe file one by one
+    for recipe in recipes_list:
+        file = open(recipe)
+        json_data = json.load(file)
+        # Removing last 5 characters from the file name to get the recipe Name
+        recipe_names = recipe.split('\\')[-1][:-5] 
+        
+        # Identify load nodes with matching object and field
+        sources_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='load'and (json_data['nodes'][node]['parameters']['dataset'].get('type') == 'connectedDataset')) and (objt is not None and (json_data['nodes'][node]['parameters']['dataset'].get('sourceObjectName')) == objt and fld in (json_data['nodes'][node]['parameters'].get('fields')))]
+
+        # Extract different node types based on action
+        filter_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action']) in['filter','sqlFilter'])]
+        transform_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='formula')]
+        aggregate_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='aggregate')]
+        edit_attributes_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='schema')]
+        other_types_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action']) in ['formula','filter','schema','aggregate','sqlFilter'])]
+        input_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='load')] 
+
+         # Map each join node to its source nodes
+        join_nodes = dict() 
+        for nd in json_data['nodes']:
+            if json_data['nodes'][nd]['action']=='join':
+                join_nodes[nd]=json_data['nodes'][nd]['sources']
+                
+
+        # Map each TRANSFORM UI node to its formula graph
+        formula_node_source_transform_node = {} 
+        for node in json_data['ui']['nodes']:
+            if json_data['ui']['nodes'][node]['type']== 'TRANSFORM':
+                key = node
+                for k,v in json_data['ui']['nodes'][node]['graph'].items():
+                    formula_node_source_transform_node.setdefault(key,[]).append(k)
+
+        # Map each AGGREGATE UI node to its source node
+        aggregate_node_source_node = {}
+        for node in json_data['ui']['nodes']:
+            if json_data['ui']['nodes'][node]['type']== 'AGGREGATE':
+                key = node
+                extract_nodes = json_data['ui']['nodes'][node]['graph']
+                source_nodes  = list(extract_nodes.keys())[1]
+                aggregate_node_source_node.setdefault(node,[]).append(source_nodes)
+
+
+        # Map all transformation nodes to their input source node
+        other_node_source_node = {}   
+        for node in other_types_nodes:
+            key = node
+            other_node_source_node.setdefault(key,[]).append(json_data['nodes'][node]['sources'][0])
+
+        #Initialize lineage tracking structures
+        left_join  = set() 
+        right_join = set() 
+        source_dep = {}    
+        initial_sources =[] 
+        source_map = {}     
+        fields = ["recipe_name","nodes_name","node_label","sub_node_name","field_used","field_name","field_api_name"] # final output file columns name
+        data_nodes = {field: [] for field in fields} 
+        
+        #Assigning input field name into the source dep
+        source_dep['actual_value'] = fld # 
+        
+
+        # Step 1: Trace downstream from the source node through join and transform nodes (left stream)
+        queue = set(sources_node)  
+
+        while queue:
+             current = queue.pop()
+             found_in_joins = False
+             for key, values in join_nodes.items():
+                  if values[0] == current and key not in left_join:
+                      left_join.add(key)
+                      queue.add(key)  # Keep checking this key for more matches in first position
+                      found_in_joins = True
+                  if values[1] == current:
+                      right_join.add(key)
+                      source_dep[key] = json_data['nodes'][key]['parameters']['rightQualifier'] + '.' + fld
+                      initial_sources.append(key)
+
+            
+             if not found_in_joins:
+                  for other_key, other_values in other_node_source_node.items():
+                      if current in other_values:
+                          found_in_formula_node_source_transform_node = False
+                          for node_key, node_values in formula_node_source_transform_node.items():
+                              if other_key in node_values:
+                                  last_value = node_values[-1]
+                                  if last_value not in queue and last_value not in left_join:
+                                      left_join.add(last_value)
+                                      queue.add(last_value)
+                                      found_in_formula_node_source_transform_node = True
+                          if not found_in_formula_node_source_transform_node:
+                              if other_key not in queue and other_key not in left_join:
+                                  left_join.add(other_key)
+                                  queue.add(other_key)
+
+        # Step 2 & Step 3: Trace bi-directionally across join nodes between left and right streams
+        while True:
+            prev_left_join = left_join.copy()
+            prev_right_join = right_join.copy()
+            
+            # Step 2: Update left join based on right join 
+
+            queue_left = list(right_join)
+            while queue_left:
+                current = queue_left.pop()
+                found_in_joins = False
+                for key, values in join_nodes.items():
+                    if values[0] == current and key not in left_join:
+                        left_join.add(key)
+                        queue_left.append(key)
+                        source_map[current] = key
+                        found_in_joins = True
+                if not found_in_joins:
+                    for other_key, other_values in other_node_source_node.items():
+                        if current in other_values:
+                            found_in_formula_node_source_transform_node = False
+                    # extracting transformation nodes final formulas for the left data stream nodes processing
+                            for node_key, node_values in formula_node_source_transform_node.items():
+                                if other_key in node_values:
+                                    last_value = node_values[-1]
+                                    if last_value not in queue_left and last_value not in left_join:
+                                        left_join.add(last_value)
+                                        queue_left.append(last_value)
+                                        found_in_formula_node_source_transform_node = True
+                            if not found_in_formula_node_source_transform_node:
+                                if other_key not in queue_left and other_key not in left_join:
+                                    left_join.add(other_key)
+                                    queue_left.append(other_key)
+
+                # Step 3 Update right join based on left join
+                queue_right = list(left_join)
+                while queue_right:
+                    current = queue_right.pop()
+                    for key, values in join_nodes.items():
+                        if values[1] == current and key not in right_join:
+                            right_join.add(key)
+                            queue_right.append(key)
+                         
+            # If no new matches are found, stop
+            if left_join == prev_left_join and right_join == prev_right_join:
+                break
+
+        # Collect right join nodes that are not initial sources
+        excep_initial_right_joins = [ node for node in right_join if node not in initial_sources]
+
+        # Map right join nodes to their corresponding input source node
+        right_join_source_node = {} 
+        for node in excep_initial_right_joins:
+            for key, values in join_nodes.items():
+                if key == node:
+                    right_join_source_node[node] = values[1]
+
+
+
+        # step 4 Trace complete data stream lineage from every input node
+        data_streams = defaultdict(set)
+        for inputs in input_nodes:
+            visited = set()
+            queue = {inputs}
+            while queue:
+                current = queue.pop()
+                found_in_joins = False
+                for key, values in join_nodes.items():
+                    if values[0] == current and key not in visited:
+                        visited.add(key)
+                        queue.add(key)
+                        data_streams[inputs].add(key)
+                        found_in_joins = True
+                if not found_in_joins:
+                    for other_key, other_values in other_node_source_node.items():
+                        if current in other_values:
+                            found_in_formula_node_source_transform_node = False
+                            for node_key, node_values in formula_node_source_transform_node.items():
+                                if other_key in node_values:
+                                    last_value = node_values[-1]
+                                    if last_value not in visited:
+                                        visited.add(last_value)
+                                        queue.add(last_value)
+                                        data_streams[inputs].add(node_key)
+                                    found_in_formula_node_source_transform_node = True
+                                    break
+                            # If not found in other_node, add the other_key directly
+                            if not found_in_formula_node_source_transform_node:
+                                if other_key not in visited:
+                                    visited.add(other_key)
+                                    queue.add(other_key)
+                                    data_streams[inputs].add(other_key)
+                                    
+                                    
+        # Collect stream for relevant sources(objt)  
+        relevant_stream = set()
+        for node in sources_node:
+            if node in data_streams:
+                relevant_stream.update(data_streams[node])
+
+
+        # Step 5 Build dependency mapping for indirect right join nodes
+        for k, v in right_join_source_node.items():
+             for dataset, ops in data_streams.items():
+                 if v in ops:
+                     # gather all right-join nodes in this ops set that have a source_dep entry
+                     candidates = ops & right_join & source_dep.keys()
+                     # fetch the rightQualifier for k only once
+                     rq = json_data['nodes'][k]['parameters'].get('rightQualifier', '')
+                     all_concats = []
+                     for item in candidates:
+                         raw = source_dep[item]
+                         vals = raw if isinstance(raw,list) else [raw]
+                         for single in vals:
+                             all_concats.append(f"{rq}.{single}")
+                     source_dep[k] = ",".join(all_concats)
+
+
+
+        # step 6 : Flatten dependency fields
+        flat_dep_values = set()
+        for val in source_dep.values():
+            if isinstance(val,list):
+                flat_dep_values.extend(val)
+            else:
+                flat_dep_values.add(val)
+
+
+        # step 7 : Processing filter_nodes which has input values
+        for node in filter_node:
+            for values in flat_dep_values:
+                # Retrieve the filter expression safely using .get()
+                filter_expressions = json_data['nodes'][node]['parameters'].get('filterExpressions', [])
+                if filter_expressions:
+                    filter_expr = filter_expressions[0]
+                    # Use .get() to protect against missing keys in the expression
+                    field_in_expr = filter_expr.get('field', '')
+                    if field_in_expr == values:
+                        data_nodes["recipe_name"].append(recipe_names)
+                        data_nodes["nodes_name"].append(node)
+                        data_nodes["node_label"].append(json_data['ui']['nodes'][node].get('label', ''))
+                        data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
+                        data_nodes["field_used"].append(values)
+                        data_nodes["field_name"].append(field_in_expr)
+                        # Adjust the following if field_api_name is different; otherwise, using field_in_expr
+                        data_nodes["field_api_name"].append(field_in_expr)
+
+
+
+
+        # step 8 : Processing formula_nodes which has input values
+        for node in transform_nodes:
+            for values in flat_dep_values:
+                # Safely get the fields list (avoid list index error)
+                fields_list = json_data['nodes'][node]['parameters'].get('fields', [])
+                if fields_list:
+                    field_data = fields_list[0]
+                    formula_expr = field_data.get('formulaExpression', '')
+                    # Safer pattern: match field exactly
+                    pattern = rf"(?<!\.)\b{re.escape(values)}\b"
+
+                    if re.search(pattern, formula_expr):
+                
+                        # Find the label from the mapping; default to empty string if not found
+                        labels = next((k for k, v in formula_node_source_transform_node.items() if node in v), '')
+                        data_nodes["recipe_name"].append(recipe_names)
+                        data_nodes["nodes_name"].append(labels)
+                        data_nodes["node_label"].append(json_data['ui']['nodes'][labels].get('label'))
+                        data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label'))
+                        data_nodes["field_used"].append(values)
+                        data_nodes["field_name"].append(field_data.get("label", ""))
+                        data_nodes["field_api_name"].append(field_data.get("name", "")) 
+
+
+        # step 9 : Processing edit_attributes_nodes and drop_nodes (schema nodes) -----
+        for node in edit_attributes_nodes:
+            nodes_params = json_data['nodes'][node]['parameters'] 
+            edit_attributes_list = nodes_params.get('fields', [])
+            drop_node_list = nodes_params.get(('slice'),{}).get('fields', [])
+            if edit_attributes_list or drop_node_list :
+                for values in flat_dep_values:
+                    #check match for edi attributes nodes
+                    for fields in edit_attributes_list:
+                        if fields.get('name') == values:
+                            # Find the label from the mapping; default to empty string if not found
+                            labels = next((k for k, v in formula_node_source_transform_node.items() if node in v), '')
+                            data_nodes["recipe_name"].append(recipe_names)
+                            data_nodes["nodes_name"].append(labels)
+                            data_nodes["node_label"].append(json_data['ui']['nodes'][labels].get('label'))
+                            data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label'))
+                            data_nodes["field_used"].append(values)
+                            data_nodes["field_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('label'))
+                            data_nodes["field_api_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('name'))    
+
+                    # check match for Drop nodes
+                    for fields in drop_node_list:
+                        if fields == values:
+                            # Find the label from the mapping; default to empty string if not found
+                            labels = next((k for k, v in formula_node_source_transform_node.items() if node in v), '')
+                            data_nodes["recipe_name"].append(recipe_names)
+                            data_nodes["nodes_name"].append(labels)
+                            data_nodes["node_label"].append(json_data['ui']['nodes'][labels].get('label'))
+                            data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label'))
+                            data_nodes["field_used"].append(values)
+                            data_nodes["field_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label', ''))
+                            data_nodes["field_api_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label', ''))
+                             
+                         
+                         
+        # step 10 : Processing join_nodes which has input values ----- 
+        for node in join_nodes:
+            join_params = json_data['nodes'][node]['parameters']
+            left_keys = join_params.get('leftKeys',[])
+            right_keys = join_params.get('rightKeys',[])
+            for values in flat_dep_values:
+                if values in left_keys or values in right_keys:
+                    data_nodes["recipe_name"].append(recipe_names)
+                    data_nodes["nodes_name"].append(node)
+                    data_nodes["node_label"].append(json_data['ui']['nodes'][node].get('label', ''))
+                    data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
+                    data_nodes["field_used"].append(values)
+                    data_nodes["field_name"].append(values)
+                    data_nodes["field_api_name"].append(values)
+                     
+                     
+        # step 11 : Processing aggregate_nodes which has input values -----
+        for node in aggregate_nodes:
+            nodes_params = json_data['nodes'][node]['parameters'] 
+            group_rows_list = nodes_params.get('groupings', [])
+            group_columns_list = nodes_params.get(('pivot_v2'),{}).get('sourceFields', [])
+            if group_rows_list or group_columns_list :
+                for values in flat_dep_values:
+                    #check match for edi attributes nodes
+                    for fields in group_rows_list:
+                        if fields == values:
+                            # Find the label from the mapping; default to empty string if not found
+                            label = next((k for k, v in formula_node_source_transform_node.items() if node in v), '')
+                            data_nodes["recipe_name"].append(recipe_names)
+                            data_nodes["nodes_name"].append(node)
+                            data_nodes["node_label"].append(label)
+                            data_nodes["sub_node_name"].append(label)
+                            data_nodes["field_used"].append(values)
+                            data_nodes["field_name"].append(node)
+                            data_nodes["field_api_name"].append(node)
+
+                # check match for Drop nodes
+                for fields in group_columns_list:
+                    if fields == values:
+                        # Find the label from the mapping; default to empty string if not found
+                        label = next((k for k, v in aggregate_node_source_node.items() if node in v), '')
+                        data_nodes["recipe_name"].append(recipe_names)
+                        data_nodes["nodes_name"].append(node)
+                        data_nodes["node_label"].append(label)
+                        data_nodes["sub_node_name"].append(label)
+                        data_nodes["field_used"].append(values)
+                        data_nodes["field_name"].append(node)
+                        data_nodes["field_api_name"].append(node)
+
+             
+        df = pd.DataFrame(data_nodes)
+        
+        # Filter out invalid node matches for input field
+        if relevant_stream:
+            condition = ~((df["field_used"]==fld) & (~df["nodes_name"].isin(relevant_stream)))
+        else:
+            condition = df["field_used"] != fld
+
+        #filtered dataframe
+        df_filtered = df[condition]
+
+
+
+        # Write to CSV with overwrite only on the first file,append thereafter
+        write_mode = 'w' if first_write else 'a'
+        df_filtered.to_csv(output_file, mode=write_mode, header=first_write, index=False)
+        first_write = False  # Switch to append mode for subsequent files
+        print(df_filtered)
+field_tracking(objt,fld)
