@@ -7,7 +7,7 @@ import re
 
 def field_tracking(objt, fld):
     #get all the data recipe json files from the folder 
-    recipes_list = glob.glob(r"C:\Users\ram\Downloads\test data recipe/*.json")
+    recipes_list = glob.glob(r"C:\Users\ramdk\Downloads\test data recipe/*.json")
     
     # Define path to Desktop and output CSV file location
     desktop_folder = os.path.expanduser("~/Desktop")  # Works on Linux/Mac; on Windows, this resolves to the user's Desktop
@@ -272,7 +272,6 @@ def field_tracking(objt, fld):
         
         # step 7 : Processing filter_nodes which has input values
         for node in filter_node:
-            # Retrieve the filter expression safely using .get()
             nodes_params = json_data['nodes'][node]['parameters'].get('filterExpressions')
             for flds in nodes_params:
                 for values in flat_dep_values:
@@ -284,7 +283,6 @@ def field_tracking(objt, fld):
                         data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
                         data_nodes["field_used"].append(values)
                         data_nodes["field_name"].append(values)
-                        # Adjust the following if field_api_name is different; otherwise, using field_in_expr
                         data_nodes["field_api_name"].append(values)
                         
             
@@ -301,14 +299,12 @@ def field_tracking(objt, fld):
                         data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
                         data_nodes["field_used"].append(values)
                         data_nodes["field_name"].append(values)
-                        # Adjust the following if field_api_name is different; otherwise, using field_in_expr
                         data_nodes["field_api_name"].append(values)
                 
 
-        # step 8 : Processing formula_nodes which has input values
+        # step 9 : Processing formula_nodes which has input values
         for node in transform_nodes:
             for values in flat_dep_values:
-                # Safely get the fields list (avoid list index error)
                 fields_list = json_data['nodes'][node]['parameters'].get('fields', [])
                 if fields_list:
                     field_data = fields_list[0]
@@ -329,7 +325,7 @@ def field_tracking(objt, fld):
                         data_nodes["field_api_name"].append(field_data.get("name", "")) 
 
 
-        # step 9 : Processing edit_attributes_nodes(schema nodes) -----
+        # step 10 : Processing edit_attributes_nodes which has input values (schema nodes) -----
         for node in edit_attributes_nodes:
             nodes_params = json_data['nodes'][node]['parameters'] 
             edit_attributes_list = nodes_params.get('fields', [])
@@ -349,7 +345,7 @@ def field_tracking(objt, fld):
                             data_nodes["field_api_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('name')) 
 
 
-        # step 9 : Processing drop_nodes (schema nodes) -----     
+        # step 11 : Processing drop_nodes which has input values (schema nodes) -----     
         for node in edit_attributes_nodes:
             nodes_params = json_data['nodes'][node]['parameters']
             drop_node_list = nodes_params.get(('slice'),{}).get('fields', [])
@@ -371,7 +367,7 @@ def field_tracking(objt, fld):
                              
                          
                          
-        # step 10 : Processing join_nodes which has input values ----- 
+        # step 12 : Processing join_nodes which has input values ----- 
         for node in join_nodes:
             join_params = json_data['nodes'][node]['parameters']
             left_keys = join_params.get('leftKeys',[])
@@ -387,7 +383,7 @@ def field_tracking(objt, fld):
                     data_nodes["field_api_name"].append(values)
                      
                      
-        # step 11 : Processing aggregate_nodes which has input values -----
+        # step 13 : Processing aggregate_nodes which has input values -----
         for node in aggregate_nodes:
             nodes_params = json_data['nodes'][node]['parameters'] 
             group_rows_list = nodes_params.get('groupings', [])
