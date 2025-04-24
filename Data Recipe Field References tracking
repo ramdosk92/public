@@ -7,7 +7,7 @@ import re
 
 def field_tracking(objt, fld):
     #get all the data recipe json files from the folder 
-    recipes_list = glob.glob(r"C:\Users\ramdk\Downloads\Project\DataRecipe backup\Newer Version/*.json")
+    recipes_list = glob.glob(r"C:\Users\ram\Downloads\test data recipe/*.json")
     
     # Define path to Desktop and output CSV file location
     desktop_folder = os.path.expanduser("~/Desktop")  # Works on Linux/Mac; on Windows, this resolves to the user's Desktop
@@ -16,8 +16,8 @@ def field_tracking(objt, fld):
     
     #process each recipe file one by one
     for recipe in recipes_list:
-        file = open(recipe)
-        json_data = json.load(file)
+        with open(recipe) as file:
+            json_data = json.load(file)
         # Removing last 5 characters from the file name to get the recipe Name
         recipe_names = recipe.split('\\')[-1][:-5] 
         
@@ -25,7 +25,8 @@ def field_tracking(objt, fld):
         sources_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='load'and (json_data['nodes'][node]['parameters']['dataset'].get('type') == 'connectedDataset')) and (objt is not None and (json_data['nodes'][node]['parameters']['dataset'].get('sourceObjectName')) == objt and fld in (json_data['nodes'][node]['parameters'].get('fields')))]
 
         # Extract different node types based on action
-        filter_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action']) in['filter','sqlFilter'])]
+        filter_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action']) == 'filter')]
+        custom_filter_node = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action']) == 'sqlFilter')]
         transform_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='formula')]
         aggregate_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='aggregate')]
         edit_attributes_nodes = [node for node in json_data['nodes'] if ((json_data['nodes'][node]['action'])=='schema')]
@@ -67,8 +68,7 @@ def field_tracking(objt, fld):
         left_join  = set() 
         right_join = set() 
         source_dep = {}    
-        initial_sources =[] 
-        source_map = {}     
+        initial_sources =[]    
         fields = ["recipe_name","nodes_name","node_label","sub_node_name","field_used","field_name","field_api_name"] # final output file columns name
         data_nodes = {field: [] for field in fields} 
         
@@ -124,8 +124,9 @@ def field_tracking(objt, fld):
                     if values[0] == current and key not in left_join:
                         left_join.add(key)
                         queue_left.append(key)
-                        source_map[current] = key
                         found_in_joins = True
+                    if values[1] == current and key not in right_join:
+                        right_join.add(key)
                 if not found_in_joins:
                     for other_key, other_values in other_node_source_node.items():
                         if current in other_values:
@@ -161,10 +162,20 @@ def field_tracking(objt, fld):
 
         # Map right join nodes to their corresponding input source node
         right_join_source_node = {} 
+        formula_to_transform = {}
+        for transform, formulas in formula_node_source_transform_node.items():
+            for formula in formulas:
+                formula_to_transform[formula] = transform
         for node in excep_initial_right_joins:
-            for key, values in join_nodes.items():
+             for key, values in join_nodes.items():
                 if key == node:
-                    right_join_source_node[node] = values[1]
+                    right_value = values[1]
+                    # Check if right_value is a formula, and map to transform if so
+                    if right_value in formula_to_transform:
+                        right_join_source_node[node] = formula_to_transform[right_value]
+                    else:
+                        right_join_source_node[node] = right_value
+                        
 
 
 
@@ -201,63 +212,98 @@ def field_tracking(objt, fld):
                                     visited.add(other_key)
                                     queue.add(other_key)
                                     data_streams[inputs].add(other_key)
-                                    
+        
                                     
         # Collect stream for relevant sources(objt)  
         relevant_stream = set()
         for node in sources_node:
             if node in data_streams:
                 relevant_stream.update(data_streams[node])
+        
 
+        # Step 5: Build dependency mapping for indirect right join nodes
+        unresolved = right_join_source_node.copy()
+        resolved_keys = set()
 
-        # Step 5 Build dependency mapping for indirect right join nodes
-        for k, v in right_join_source_node.items():
-             for dataset, ops in data_streams.items():
-                 if v in ops:
-                     # gather all right-join nodes in this ops set that have a source_dep entry
-                     candidates = ops & right_join & source_dep.keys()
-                     # fetch the rightQualifier for k only once
-                     rq = json_data['nodes'][k]['parameters'].get('rightQualifier', '')
-                     all_concats = []
-                     for item in candidates:
-                         raw = source_dep[item]
-                         vals = raw if isinstance(raw,list) else [raw]
-                         for single in vals:
-                             all_concats.append(f"{rq}.{single}")
-                     source_dep[k] = ",".join(all_concats)
+        while unresolved:
+            next_unresolved = {}
+            for k, v in unresolved.items():
+                matched_data_stream = [nodes for sources, nodes in data_streams.items() if v in nodes]
+                if not matched_data_stream:
+                    continue
+                nodes_set = matched_data_stream[0]
+                rq = json_data['nodes'][k]['parameters'].get('rightQualifier', '')
+                if not rq:
+                    continue
+                relevant_nodes = nodes_set & right_join
+                all_concats = []
+                still_unresolved = False  # Track if any relevant node in this node is unresolved
 
+                for item in relevant_nodes:
+                    if item in source_dep:
+                        raw = source_dep[item]
+                        vals = raw if isinstance(raw, list) else [raw]
+                        all_concats.extend(f"{rq}.{val}" for val in vals)
+                    else:
+                        next_unresolved[k] = v  
+                        still_unresolved = True
+
+                # If at least one relevant node was resolved, update source_dep
+                if all_concats:
+                    source_dep[k] = all_concats
+                    resolved_keys.add(k)
+                if not still_unresolved and k not in source_dep:
+                    next_unresolved[k] = v
+            if unresolved == next_unresolved:
+                break
+            unresolved = next_unresolved
 
 
         # step 6 : Flatten dependency fields
         flat_dep_values = set()
         for val in source_dep.values():
             if isinstance(val,list):
-                flat_dep_values.extend(val)
+                flat_dep_values.update(val)
             else:
-                flat_dep_values.add(val)
+                 flat_dep_values.add(val)
+        
+        
 
-
+        
         # step 7 : Processing filter_nodes which has input values
         for node in filter_node:
-            for values in flat_dep_values:
-                # Retrieve the filter expression safely using .get()
-                filter_expressions = json_data['nodes'][node]['parameters'].get('filterExpressions', [])
-                if filter_expressions:
-                    filter_expr = filter_expressions[0]
-                    # Use .get() to protect against missing keys in the expression
-                    field_in_expr = filter_expr.get('field', '')
-                    if field_in_expr == values:
+            # Retrieve the filter expression safely using .get()
+            nodes_params = json_data['nodes'][node]['parameters'].get('filterExpressions')
+            for flds in nodes_params:
+                for values in flat_dep_values:
+                    #check match for regular filter nodes
+                    if (flds['field']) == values:
                         data_nodes["recipe_name"].append(recipe_names)
                         data_nodes["nodes_name"].append(node)
                         data_nodes["node_label"].append(json_data['ui']['nodes'][node].get('label', ''))
                         data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
                         data_nodes["field_used"].append(values)
-                        data_nodes["field_name"].append(field_in_expr)
+                        data_nodes["field_name"].append(values)
                         # Adjust the following if field_api_name is different; otherwise, using field_in_expr
-                        data_nodes["field_api_name"].append(field_in_expr)
-
-
-
+                        data_nodes["field_api_name"].append(values)
+                        
+            
+        # step 8 : Processing customfilter_nodes which has input values
+        for node in custom_filter_node:
+            fields_list = json_data['nodes'][node]['parameters'].get('sqlFilterExpression', [])
+            if fields_list:
+                for values in flat_dep_values:
+                    pattern = rf"(?<!\w){re.escape(values)}(?!\w)"
+                    if re.search(pattern, fields_list):
+                        data_nodes["recipe_name"].append(recipe_names)
+                        data_nodes["nodes_name"].append(node)
+                        data_nodes["node_label"].append(json_data['ui']['nodes'][node].get('label', ''))
+                        data_nodes["sub_node_name"].append(json_data['ui']['nodes'][node].get('label', ''))
+                        data_nodes["field_used"].append(values)
+                        data_nodes["field_name"].append(values)
+                        # Adjust the following if field_api_name is different; otherwise, using field_in_expr
+                        data_nodes["field_api_name"].append(values)
+                
 
         # step 8 : Processing formula_nodes which has input values
         for node in transform_nodes:
@@ -283,12 +329,11 @@ def field_tracking(objt, fld):
                         data_nodes["field_api_name"].append(field_data.get("name", "")) 
 
 
-        # step 9 : Processing edit_attributes_nodes and drop_nodes (schema nodes) -----
+        # step 9 : Processing edit_attributes_nodes(schema nodes) -----
         for node in edit_attributes_nodes:
             nodes_params = json_data['nodes'][node]['parameters'] 
             edit_attributes_list = nodes_params.get('fields', [])
-            drop_node_list = nodes_params.get(('slice'),{}).get('fields', [])
-            if edit_attributes_list or drop_node_list :
+            if edit_attributes_list:
                 for values in flat_dep_values:
                     #check match for edi attributes nodes
                     for fields in edit_attributes_list:
@@ -301,17 +346,25 @@ def field_tracking(objt, fld):
                             data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label'))
                             data_nodes["field_used"].append(values)
                             data_nodes["field_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('label'))
-                            data_nodes["field_api_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('name'))    
+                            data_nodes["field_api_name"].append(json_data['nodes'][node]['parameters']['fields'][0]['newProperties'].get('name')) 
 
+
+        # step 9 : Processing drop_nodes (schema nodes) -----     
+        for node in edit_attributes_nodes:
+            nodes_params = json_data['nodes'][node]['parameters']
+            drop_node_list = nodes_params.get(('slice'),{}).get('fields', [])
+            if drop_node_list :
+                for values in flat_dep_values:
                     # check match for Drop nodes
                     for fields in drop_node_list:
                         if fields == values:
+                            print(f"field.{fields}")
                             # Find the label from the mapping; default to empty string if not found
                             labels = next((k for k, v in formula_node_source_transform_node.items() if node in v), '')
                             data_nodes["recipe_name"].append(recipe_names)
                             data_nodes["nodes_name"].append(labels)
                             data_nodes["node_label"].append(json_data['ui']['nodes'][labels].get('label'))
-                            data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label'))
+                            data_nodes["sub_node_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label',''))
                             data_nodes["field_used"].append(values)
                             data_nodes["field_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label', ''))
                             data_nodes["field_api_name"].append(json_data['ui']['nodes'][labels]['graph'][node].get('label', ''))
@@ -366,18 +419,21 @@ def field_tracking(objt, fld):
                         data_nodes["field_used"].append(values)
                         data_nodes["field_name"].append(node)
                         data_nodes["field_api_name"].append(node)
-
-             
+                        
+        
         df = pd.DataFrame(data_nodes)
+        print("source_depsource_dep:{}".format(source_dep))
+        
+        invalid_field = df["field_used"].isna() | (df["field_used"] == "")
         
         # Filter out invalid node matches for input field
         if relevant_stream:
-            condition = ~((df["field_used"]==fld) & (~df["nodes_name"].isin(relevant_stream)))
+            condition = ~((df["field_used"]==fld) & (~df["nodes_name"].isin(relevant_stream))) & ~invalid_field
         else:
             condition = df["field_used"] != fld
 
         #filtered dataframe
-        df_filtered = df[condition]
+        df_filtered = df[condition & ~invalid_field]
 
 
 
@@ -386,4 +442,3 @@ def field_tracking(objt, fld):
         df_filtered.to_csv(output_file, mode=write_mode, header=first_write, index=False)
         first_write = False  # Switch to append mode for subsequent files
         print(df_filtered)
-field_tracking(objt,fld)
